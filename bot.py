@@ -204,6 +204,10 @@ def download_audio(url: str, user_id: int) -> tuple[str | None, int]:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
