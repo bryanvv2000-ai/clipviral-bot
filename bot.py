@@ -31,10 +31,10 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-FREE_DAILY_LIMIT = 1       # 1 video por día gratis
-FREE_CLIPS_PER_VIDEO = 3   # 3 clips por video gratis
+FREE_DAILY_LIMIT = 1
+FREE_CLIPS_PER_VIDEO = 3
 STARS_PRICE = 499
-REFERRAL_COMMISSION = 99   # 20% de 499 ~ 99 Stars
+REFERRAL_COMMISSION = 99
 DOWNLOAD_DIR = "/tmp/clipviral"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 DB_PATH = "clipviral.db"
@@ -46,7 +46,6 @@ SUPPORTED_DOMAINS = (
     "tiktok.com",
 )
 
-# ── Database ──────────────────────────────────────────────────────────────────
 def init_db():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -96,9 +95,7 @@ def record_video(user_id: int):
             ON CONFLICT(user_id) DO UPDATE SET videos_today=1, last_date=excluded.last_date
         """, (user_id, today))
     else:
-        cur.execute("""
-            UPDATE users SET videos_today = videos_today + 1 WHERE user_id = ?
-        """, (user_id,))
+        cur.execute("UPDATE users SET videos_today = videos_today + 1 WHERE user_id = ?", (user_id,))
     con.commit()
     con.close()
 
@@ -117,9 +114,7 @@ def add_commission(referrer_id: int):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     cur.execute("""
-        UPDATE users
-        SET stars_earned = stars_earned + ?,
-            referral_count = referral_count + 1
+        UPDATE users SET stars_earned = stars_earned + ?, referral_count = referral_count + 1
         WHERE user_id = ?
     """, (REFERRAL_COMMISSION, referrer_id))
     con.commit()
@@ -147,35 +142,30 @@ def can_process(user_id: int) -> tuple[bool, int]:
 def is_supported_url(text: str) -> bool:
     return any(d in text.lower() for d in SUPPORTED_DOMAINS)
 
-# ── IA: Detectar momentos virales ─────────────────────────────────────────────
 async def get_viral_moments(transcript: str, duration: int, clip_duration: int) -> list[dict]:
     prompt = f"""
-Eres un experto en contenido viral para redes sociales (TikTok, YouTube Shorts, Instagram Reels).
+Eres un experto en contenido viral para redes sociales.
+Analiza esta transcripcion de un video de {duration} segundos y encuentra los 3 mejores momentos virales.
 
-Analiza esta transcripción de un video de {duration} segundos de duración y encuentra los 3 mejores momentos virales.
-
-TRANSCRIPCIÓN:
+TRANSCRIPCION:
 {transcript[:4000]}
 
-Para cada momento viral devuelve EXACTAMENTE este formato JSON (sin texto extra, solo el JSON):
+Devuelve EXACTAMENTE este JSON sin texto extra:
 [
   {{
     "start": 120,
     "end": 150,
-    "title": "Título gancho del clip",
-    "description": "Descripción viral con potencial de engagement para redes sociales (máximo 150 caracteres)",
+    "title": "Titulo gancho del clip",
+    "description": "Descripcion viral para redes sociales maximo 150 caracteres",
     "hashtags": "#hashtag1 #hashtag2 #hashtag3 #hashtag4 #hashtag5"
-  }},
-  ...
+  }}
 ]
 
 REGLAS:
-- start y end deben ser segundos exactos dentro del video
-- Cada clip debe durar aproximadamente {clip_duration} segundos
-- Busca momentos con: revelaciones, emociones fuertes, humor, consejos, controversia
-- Los hashtags deben ser relevantes y trending
-- La descripción debe generar curiosidad y clicks
-- Responde SOLO el JSON, sin explicaciones
+- start y end en segundos dentro del video
+- Cada clip dura aproximadamente {clip_duration} segundos
+- Busca momentos con emociones fuertes, revelaciones, humor, consejos
+- Responde SOLO el JSON
 """
     try:
         response = groq_client.chat.completions.create(
@@ -191,83 +181,99 @@ REGLAS:
         logger.error("Groq error: %s", e)
         return []
 
-# ── Descarga y transcripción ──────────────────────────────────────────────────
 def download_audio(url: str, user_id: int) -> tuple[str | None, int]:
-    """Descarga solo el audio del video y retorna (path, duracion_segundos)"""
-    out_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.%(ext)s")
+    out_tmpl = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.%(ext)s")
+    audio_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.mp3")
     try:
         import yt_dlp
         ydl_opts = {
-            "outtmpl": out_path,
+            "outtmpl": out_tmpl,
             "format": "bestaudio/best",
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "extractor_args": {"youtube": {"skip": ["dash", "hls"]}},
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
+            "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             duration = info.get("duration", 0)
-            audio_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.mp3")
             return audio_path, duration
     except Exception as e:
-        logger.error("Download error: %s", e)
+        logger.error("Download audio error: %s", e)
         return None, 0
 
 def download_video_segment(url: str, user_id: int, start: int, end: int, clip_num: int) -> str | None:
-    """Descarga un segmento específico del video"""
     out_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_clip{clip_num}.mp4")
+    full_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_full{clip_num}.mp4")
     try:
         import yt_dlp
+
+        for p in [out_path, full_path]:
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
         ydl_opts = {
-            "outtmpl": os.path.join(DOWNLOAD_DIR, f"{user_id}_full.%(ext)s"),
-            "format": "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "merge_output_format": "mp4",
+            "outtmpl": full_path,
+            "format": "best[ext=mp4][height<=720]/best[ext=mp4]/best",
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "download_ranges": lambda info, *args: [{"start_time": start, "end_time": end}],
-            "force_keyframes_at_cuts": True,
+            "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
 
-        full_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_full.mp4")
-        if os.path.exists(full_path):
-            subprocess.run([
-                "ffmpeg", "-y",
-                "-i", full_path,
-                "-ss", str(start),
-                "-to", str(end),
-                "-vf", "scale=720:1280:force_original_aspect_ratio=decrease,pad=720:1280:(ow-iw)/2:(oh-ih)/2",
-                "-c:v", "libx264", "-c:a", "aac",
-                "-preset", "fast",
-                out_path
-            ], capture_output=True)
-            try:
-                os.remove(full_path)
-            except Exception:
-                pass
-            return out_path if os.path.exists(out_path) else None
+        if not os.path.exists(full_path):
+            logger.error("Full video not found: %s", full_path)
+            return None
+
+        duration_sec = end - start
+        result = subprocess.run([
+            "ffmpeg", "-y",
+            "-ss", str(start),
+            "-i", full_path,
+            "-t", str(duration_sec),
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            "-preset", "fast",
+            "-movflags", "+faststart",
+            out_path
+        ], capture_output=True, text=True)
+
+        logger.info("ffmpeg return: %s", result.returncode)
+        if result.returncode != 0:
+            logger.error("ffmpeg error: %s", result.stderr[-300:])
+
+        try:
+            os.remove(full_path)
+        except Exception:
+            pass
+
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 1000:
+            return out_path
+        return None
+
     except Exception as e:
         logger.error("Segment download error: %s", e)
+        try:
+            os.remove(full_path)
+        except Exception:
+            pass
         return None
 
 def transcribe_audio(audio_path: str) -> str:
-    """Transcribe el audio usando Whisper via Groq"""
     try:
         with open(audio_path, "rb") as f:
             transcription = groq_client.audio.transcriptions.create(
                 file=(os.path.basename(audio_path), f),
                 model="whisper-large-v3",
-                language="es",
-                response_format="verbose_json",
+                response_format="text",
             )
-        return transcription.text
+        return transcription
     except Exception as e:
         logger.error("Transcription error: %s", e)
         return ""
@@ -287,7 +293,6 @@ def get_premium_keyboard():
         InlineKeyboardButton(f"⭐ Comprar Premium — {STARS_PRICE} Stars/mes", callback_data="buy_premium")
     ]])
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
@@ -308,11 +313,9 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         f"✂️ *¡Bienvenido a ClipViral Bot!*\n\n"
         f"Hola *{user.first_name}* 👋\n\n"
-        "Soy tu asistente de contenido viral. Analizo tus videos largos de "
-        "*YouTube, Twitch, Kick y TikTok* y genero automáticamente los mejores "
-        "clips con mayor potencial viral. 🔥\n\n"
+        "Analizo videos largos de *YouTube, Twitch, Kick y TikTok* y genero automáticamente los mejores clips virales. 🔥\n\n"
         "📋 *¿Cómo funciono?*\n"
-        "1️⃣ Envíame el link de un video largo\n"
+        "1️⃣ Envíame el link del video\n"
         "2️⃣ Elige la duración del clip (20, 30 o 40 segundos)\n"
         "3️⃣ Recibe tus clips con descripción y hashtags listos\n\n"
         f"🎁 *Plan Gratuito:*\n"
@@ -320,17 +323,16 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• {FREE_CLIPS_PER_VIDEO} clips por video\n\n"
         f"⭐ *Premium — {STARS_PRICE} Stars/mes:*\n"
         "• Videos ilimitados todos los días\n"
-        "• Clips ilimitados por video\n"
-        "• Prioridad en procesamiento\n\n"
+        "• Clips ilimitados por video\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💰 *¡GANA STARS GRATIS!*\n\n"
         f"Por cada amigo que compre Premium ganas *{REFERRAL_COMMISSION} Stars* automáticamente.\n\n"
         f"🔗 Tu link de referido:\n`{ref_link}`\n\n"
-        f"💡 *Ejemplo:* 5 amigos = *{5 * REFERRAL_COMMISSION} Stars* (~Premium gratis)\n\n"
+        f"💡 *Ejemplo:* 5 amigos = *{5 * REFERRAL_COMMISSION} Stars*\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📌 *Comandos:*\n"
         "/status — tus estadísticas\n"
-        "/premium — obtener acceso ilimitado\n"
+        "/premium — acceso ilimitado\n"
         "/referido — tu link para ganar Stars\n"
         "/help — ayuda"
     )
@@ -348,9 +350,8 @@ async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if is_premium(user):
         msg = (
             f"⭐ *Eres Premium* hasta `{user['premium_until']}`\n"
-            f"Videos: *ilimitados* 🎉\n"
-            f"Clips por video: *ilimitados* 🎉\n\n"
-            f"💰 Stars ganadas por referidos: *{user['stars_earned']} ⭐*\n"
+            f"Videos: *ilimitados* 🎉\n\n"
+            f"💰 Stars ganadas: *{user['stars_earned']} ⭐*\n"
             f"👥 Amigos referidos: *{user['referral_count']}*"
         )
     else:
@@ -362,7 +363,7 @@ async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Videos restantes: *{remaining}*\n\n"
             f"💰 Stars ganadas: *{user['stars_earned']} ⭐*\n"
             f"👥 Amigos referidos: *{user['referral_count']}*\n\n"
-            f"¿Quieres videos ilimitados? /premium"
+            f"¿Quieres ilimitados? /premium"
         )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -376,25 +377,19 @@ async def referido_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = (
         "💰 *Tu link de referido:*\n\n"
         f"`{ref_link}`\n\n"
-        "Comparte este link. Cuando alguien compre Premium:\n"
-        f"✅ Tú ganas *{REFERRAL_COMMISSION} Stars* automáticamente\n"
-        f"✅ Ellos obtienen clips ilimitados\n\n"
-        f"📊 *Tu historial:*\n"
-        f"👥 Amigos referidos: *{user['referral_count']}*\n"
-        f"⭐ Stars ganadas: *{user['stars_earned']}*\n\n"
-        f"💡 *Ejemplo:* 5 amigos = *{5 * REFERRAL_COMMISSION} Stars*"
+        f"✅ Por cada amigo que pague ganas *{REFERRAL_COMMISSION} Stars*\n\n"
+        f"📊 Amigos referidos: *{user['referral_count']}*\n"
+        f"⭐ Stars ganadas: *{user['stars_earned']}*"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def premium_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"⭐ *Premium — Videos y clips ilimitados*\n\n"
-        f"Precio: *{STARS_PRICE} Telegram Stars/mes* (~$5 USD)\n\n"
+        f"Precio: *{STARS_PRICE} Telegram Stars/mes*\n\n"
         "✅ Videos ilimitados por día\n"
         "✅ Clips ilimitados por video\n"
-        "✅ Procesamiento prioritario\n"
         "✅ Hashtags y descripciones virales\n\n"
-        f"💰 ¿Sin Stars? Usa /referido para ganarlas gratis.\n\n"
         "👇 Presiona para pagar:",
         parse_mode="Markdown",
         reply_markup=get_premium_keyboard(),
@@ -430,11 +425,11 @@ async def successful_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if user.get("referred_by"):
         referrer_id = user["referred_by"]
         add_commission(referrer_id)
-        referrer_msg = f"\n\n💰 ¡Tu amigo que te invitó acaba de ganar *{REFERRAL_COMMISSION} Stars*!"
+        referrer_msg = f"\n\n💰 ¡Tu amigo ganó *{REFERRAL_COMMISSION} Stars*!"
         try:
             await ctx.bot.send_message(
                 chat_id=referrer_id,
-                text=f"🎉 *¡Ganaste {REFERRAL_COMMISSION} Stars!*\n\nUno de tus referidos compró Premium. ¡Sigue compartiendo con /referido! 💰",
+                text=f"🎉 *¡Ganaste {REFERRAL_COMMISSION} Stars!*\n\nUno de tus referidos compró Premium. ¡Sigue compartiendo! 💰",
                 parse_mode="Markdown"
             )
         except Exception:
@@ -442,8 +437,7 @@ async def successful_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🎉 *¡Pago exitoso! Ya eres Premium.*\n\n"
-        f"Tu acceso vence el *{until}*.\n"
-        f"¡Disfruta clips ilimitados! 🚀{referrer_msg}",
+        f"Tu acceso vence el *{until}*. 🚀{referrer_msg}",
         parse_mode="Markdown",
     )
 
@@ -455,8 +449,7 @@ async def handle_url(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_supported_url(url):
         await update.message.reply_text(
             "❌ URL no soportada.\n\n"
-            "Plataformas compatibles:\n"
-            "▶️ YouTube\n🟣 Twitch\n🟢 Kick\n🎵 TikTok (VODs)"
+            "Plataformas: YouTube, Twitch, Kick, TikTok"
         )
         return
 
@@ -466,27 +459,21 @@ async def handle_url(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ref_link = get_ref_link(bot_username, uid)
         await update.message.reply_text(
             f"⛔ *Límite diario alcanzado*\n\n"
-            f"Ya procesaste tu video gratuito de hoy.\n\n"
-            "¿Cómo conseguir más?\n\n"
-            f"⭐ *Opción 1:* Compra Premium por *{STARS_PRICE} Stars/mes*\n\n"
-            f"💰 *Opción 2:* Gana Stars compartiendo:\n"
-            f"`{ref_link}`\n"
-            f"Cada amigo que pague = *{REFERRAL_COMMISSION} Stars para ti*\n\n"
-            "🕐 *Opción 3:* Vuelve mañana",
+            f"⭐ *Premium:* {STARS_PRICE} Stars/mes\n\n"
+            f"💰 *Gratis:* Comparte tu link:\n`{ref_link}`\n"
+            f"Cada amigo que pague = *{REFERRAL_COMMISSION} Stars*\n\n"
+            "🕐 O vuelve mañana",
             parse_mode="Markdown",
             reply_markup=get_premium_keyboard(),
         )
         return
 
-    # Pedir duración del clip
     ctx.user_data["pending_url"] = url
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⏱ 20 segundos", callback_data="clip_20"),
-            InlineKeyboardButton("⏱ 30 segundos", callback_data="clip_30"),
-            InlineKeyboardButton("⏱ 40 segundos", callback_data="clip_40"),
-        ]
-    ])
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("⏱ 20 seg", callback_data="clip_20"),
+        InlineKeyboardButton("⏱ 30 seg", callback_data="clip_30"),
+        InlineKeyboardButton("⏱ 40 seg", callback_data="clip_40"),
+    ]])
     await update.message.reply_text(
         "✂️ *¿Qué duración quieres para cada clip?*",
         parse_mode="Markdown",
@@ -508,42 +495,28 @@ async def clip_duration_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(
         f"⏳ *Procesando tu video...*\n\n"
         f"🔍 Descargando audio...\n"
-        f"Esto puede tardar 1-3 minutos según la duración del video.",
+        f"Esto puede tardar 1-3 minutos.",
         parse_mode="Markdown"
     )
 
-    # Descargar audio
-    audio_path, duration = await asyncio.get_event_loop().run_in_executor(
-        None, download_audio, url, uid
-    )
+    loop = asyncio.get_event_loop()
+    audio_path, duration = await loop.run_in_executor(None, download_audio, url, uid)
 
     if not audio_path or not os.path.exists(audio_path):
-        await query.edit_message_text("❌ No pude descargar el video. Verifica el link e intenta de nuevo.")
+        await ctx.bot.send_message(chat_id=uid, text="❌ No pude descargar el audio. Verifica el link e intenta de nuevo.")
         return
 
-    await ctx.bot.send_message(
-        chat_id=uid,
-        text="🎙️ *Transcribiendo audio con IA...*",
-        parse_mode="Markdown"
-    )
+    await ctx.bot.send_message(chat_id=uid, text="🎙️ *Transcribiendo audio con IA...*", parse_mode="Markdown")
 
-    # Transcribir
-    transcript = await asyncio.get_event_loop().run_in_executor(
-        None, transcribe_audio, audio_path
-    )
+    transcript = await loop.run_in_executor(None, transcribe_audio, audio_path)
     cleanup(audio_path)
 
     if not transcript:
         await ctx.bot.send_message(chat_id=uid, text="❌ No pude transcribir el audio. Intenta con otro video.")
         return
 
-    await ctx.bot.send_message(
-        chat_id=uid,
-        text="🔥 *Detectando momentos virales con IA...*",
-        parse_mode="Markdown"
-    )
+    await ctx.bot.send_message(chat_id=uid, text="🔥 *Detectando momentos virales con IA...*", parse_mode="Markdown")
 
-    # Detectar momentos virales
     moments = await get_viral_moments(transcript, duration, clip_duration)
 
     if not moments:
@@ -562,54 +535,35 @@ async def clip_duration_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown"
     )
 
-    # Descargar y enviar cada clip
     for i, moment in enumerate(moments, 1):
-        start_sec = moment.get("start", 0)
-        end_sec = moment.get("end", start_sec + clip_duration)
+        start_sec = int(moment.get("start", 0))
+        end_sec = int(moment.get("end", start_sec + clip_duration))
         title = moment.get("title", f"Clip {i}")
         description = moment.get("description", "")
         hashtags = moment.get("hashtags", "")
 
-        await ctx.bot.send_message(
-            chat_id=uid,
-            text=f"⏬ *Descargando clip {i}/{len(moments)}...*",
-            parse_mode="Markdown"
-        )
+        await ctx.bot.send_message(chat_id=uid, text=f"⏬ *Descargando clip {i}/{len(moments)}...*", parse_mode="Markdown")
 
-        clip_path = await asyncio.get_event_loop().run_in_executor(
-            None, download_video_segment, url, uid, start_sec, end_sec, i
+        clip_path = await loop.run_in_executor(None, download_video_segment, url, uid, start_sec, end_sec, i)
+
+        caption = (
+            f"🎬 *Clip {i}:* {title}\n\n"
+            f"📝 {description}\n\n"
+            f"🏷️ {hashtags}"
         )
 
         if clip_path and os.path.exists(clip_path):
-            caption = (
-                f"🎬 *Clip {i}:* {title}\n\n"
-                f"📝 {description}\n\n"
-                f"🏷️ {hashtags}"
-            )
             try:
                 with open(clip_path, "rb") as f:
-                    await ctx.bot.send_video(
-                        chat_id=uid,
-                        video=f,
-                        caption=caption,
-                        parse_mode="Markdown"
-                    )
+                    await ctx.bot.send_video(chat_id=uid, video=f, caption=caption, parse_mode="Markdown")
             except Exception as e:
                 logger.error("Send clip error: %s", e)
-                await ctx.bot.send_message(
-                    chat_id=uid,
-                    text=f"✅ *Clip {i}: {title}*\n\n📝 {description}\n\n🏷️ {hashtags}\n\n⚠️ El video fue muy grande para enviar.",
-                    parse_mode="Markdown"
-                )
+                await ctx.bot.send_message(chat_id=uid, text=caption + "\n\n⚠️ Video muy grande para enviar.", parse_mode="Markdown")
             finally:
                 cleanup(clip_path)
         else:
-            await ctx.bot.send_message(
-                chat_id=uid,
-                text=f"⚠️ No pude descargar el clip {i}. Intenta de nuevo.",
-            )
+            await ctx.bot.send_message(chat_id=uid, text=caption + "\n\n⚠️ No pude descargar este clip.", parse_mode="Markdown")
 
-    # Mensaje final
     user_data = get_user(uid)
     if not is_premium(user_data):
         today = str(date.today())
@@ -618,34 +572,27 @@ async def clip_duration_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
         bot_username = (await ctx.bot.get_me()).username
         ref_link = get_ref_link(bot_username, uid)
 
-        final_msg = (
-            f"✅ *¡Tus {len(moments)} clips están listos!*\n\n"
-            f"📊 Videos restantes hoy: *{remaining_videos}/{FREE_DAILY_LIMIT}*\n\n"
-        )
         if remaining_videos == 0:
-            final_msg += (
-                "⛔ *Has agotado tus videos gratuitos de hoy.*\n\n"
-                f"⭐ *¿Quieres clips ilimitados?*\n"
-                f"Premium por solo *{STARS_PRICE} Stars/mes*\n\n"
-                f"💰 *¿Prefieres gratis?*\n"
-                f"Comparte tu link y gana Stars:\n"
-                f"`{ref_link}`\n"
-                f"Cada amigo que pague = *{REFERRAL_COMMISSION} Stars*"
-            )
             await ctx.bot.send_message(
                 chat_id=uid,
-                text=final_msg,
+                text=(
+                    f"✅ *¡Tus {len(moments)} clips están listos!*\n\n"
+                    f"⛔ *Has agotado tus videos gratuitos de hoy.*\n\n"
+                    f"⭐ Premium: *{STARS_PRICE} Stars/mes*\n\n"
+                    f"💰 O gana Stars gratis:\n`{ref_link}`\n"
+                    f"Cada amigo que pague = *{REFERRAL_COMMISSION} Stars*"
+                ),
                 parse_mode="Markdown",
                 reply_markup=get_premium_keyboard()
             )
         else:
-            await ctx.bot.send_message(chat_id=uid, text=final_msg, parse_mode="Markdown")
+            await ctx.bot.send_message(
+                chat_id=uid,
+                text=f"✅ *¡Tus {len(moments)} clips están listos!*\n\nVideos restantes hoy: *{remaining_videos}*",
+                parse_mode="Markdown"
+            )
     else:
-        await ctx.bot.send_message(
-            chat_id=uid,
-            text=f"✅ *¡Tus {len(moments)} clips están listos!* 🚀",
-            parse_mode="Markdown"
-        )
+        await ctx.bot.send_message(chat_id=uid, text=f"✅ *¡Tus {len(moments)} clips están listos!* 🚀", parse_mode="Markdown")
 
 def main():
     init_db()
