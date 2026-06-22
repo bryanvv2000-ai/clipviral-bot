@@ -182,7 +182,8 @@ REGLAS:
         return []
 
 def download_audio(url: str, user_id: int) -> tuple[str | None, int]:
-    out_tmpl = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.%(ext)s")
+    out_tmpl = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio_raw.%(ext)s")
+    raw_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio_raw.mp3")
     audio_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio.mp3")
     try:
         import yt_dlp
@@ -198,7 +199,42 @@ def download_audio(url: str, user_id: int) -> tuple[str | None, int]:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             duration = info.get("duration", 0)
-            return audio_path, duration
+
+        if not os.path.exists(raw_path):
+            return None, 0
+
+        # Comprimir audio a un bitrate bajo para mantenerlo bajo 25MB
+        # 16kbps mono es suficiente para transcripcion de voz
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", raw_path,
+            "-ac", "1",
+            "-ar", "16000",
+            "-b:a", "32k",
+            audio_path
+        ], capture_output=True, text=True)
+
+        cleanup(raw_path)
+
+        if not os.path.exists(audio_path):
+            return None, 0
+
+        # Si aun supera 24MB, recortar a los primeros 90 minutos de audio
+        size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        if size_mb > 24:
+            trimmed_path = os.path.join(DOWNLOAD_DIR, f"{user_id}_audio_trim.mp3")
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-i", audio_path,
+                "-t", "5400",
+                "-ac", "1", "-ar", "16000", "-b:a", "32k",
+                trimmed_path
+            ], capture_output=True, text=True)
+            cleanup(audio_path)
+            if os.path.exists(trimmed_path):
+                os.rename(trimmed_path, audio_path)
+
+        return audio_path, duration
     except Exception as e:
         logger.error("Download audio error: %s", e)
         return None, 0
@@ -267,6 +303,8 @@ def download_video_segment(url: str, user_id: int, start: int, end: int, clip_nu
 
 def transcribe_audio(audio_path: str) -> str:
     try:
+        size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        logger.info("Audio file size: %.2f MB", size_mb)
         with open(audio_path, "rb") as f:
             transcription = groq_client.audio.transcriptions.create(
                 file=(os.path.basename(audio_path), f),
@@ -275,7 +313,7 @@ def transcribe_audio(audio_path: str) -> str:
             )
         return transcription
     except Exception as e:
-        logger.error("Transcription error: %s", e)
+        logger.error("Transcription error DETALLADO: %s", str(e))
         return ""
 
 def cleanup(path: str):
